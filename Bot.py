@@ -35,7 +35,7 @@ except ImportError:
 # ⚙️ НАСТРОЙКИ - ВСТАВЬ СВОЙ ТОКЕН СЮДА
 # =====================================
 
-BOT_TOKEN = "7230762282:AAFz9OmJZoLZAw3TMjlxf8yHsUBdHtwdqmg"
+BOT_TOKEN = "7230762282:AAFUR5TOhC4dK-i7QPz3PyHzYYVycwSc85g"
 MAIN_ADMIN_USERNAME = "venter8"
 CHANNEL_ID = -1002483918
 CHANNEL_LINK = "https://t.me/+hGOqFr0HoQM3Mjgy"
@@ -104,6 +104,7 @@ FOOD_ITEMS = [
 # =====================================
 # 🛒 ТОВАРЫ МАГАЗИНА (Базовые)
 # =====================================
+# Мебель помечается ключевыми словами для механики выживания
 
 DEFAULT_SHOP_ITEMS = [
     ("Стул", 32),
@@ -113,6 +114,7 @@ DEFAULT_SHOP_ITEMS = [
     ("Тухлый порванный зелёный матрас с мусорки", 0),
     ("Хорошая кровать", 40),
     ("Кровать", 30),
+    ("Диван", 60), # New furniture
     ("Телевизовизор", 50),
     ("Телетелевизовизовизор", 70),
     ("ТВ", 100),
@@ -127,6 +129,9 @@ DEFAULT_SHOP_ITEMS = [
     ("Аптечка 🩹", 50)
 ]
 
+# Список слов, определяющих мебель (для снижения голода)
+FURNITURE_KEYWORDS = ["стул", "стол", "дверь", "матрас", "кровать", "диван", "дом"]
+
 # =====================================
 # 🗄️ БАЗА ДАННЫХ
 # =====================================
@@ -140,6 +145,7 @@ async def init_db():
                 username TEXT,
                 player_number INTEGER UNIQUE,
                 balance INTEGER DEFAULT 0,
+                diamonds INTEGER DEFAULT 0,
                 elephant_skin INTEGER DEFAULT 0,
                 hedgehog_name TEXT DEFAULT '🦔Ежъ🦔',
                 hedgehog_color TEXT DEFAULT 'Не выбран',
@@ -162,6 +168,10 @@ async def init_db():
                 is_injured INTEGER DEFAULT 0,
                 is_banned INTEGER DEFAULT 0,
                 ban_reason TEXT DEFAULT NULL,
+                ban_ads INTEGER DEFAULT 0,
+                ban_books INTEGER DEFAULT 0,
+                is_fake_admin INTEGER DEFAULT 0,
+                alert_sent INTEGER DEFAULT 0,
                 casino_wins INTEGER DEFAULT 0,
                 casino_losses INTEGER DEFAULT 0,
                 total_casino_profit INTEGER DEFAULT 0
@@ -320,7 +330,13 @@ async def init_db():
             ("promocodes", "created_by", "TEXT DEFAULT 'Unknown'"),
             ("promocodes", "created_at", "TEXT"),
             ("shop_items", "currency", "TEXT DEFAULT 'balance'"),
-            ("admins", "can_edit_promos", "INTEGER DEFAULT 0")
+            ("admins", "can_edit_promos", "INTEGER DEFAULT 0"),
+            # Survival Update v3.8 Columns
+            ("users", "diamonds", "INTEGER DEFAULT 0"),
+            ("users", "ban_ads", "INTEGER DEFAULT 0"),
+            ("users", "ban_books", "INTEGER DEFAULT 0"),
+            ("users", "is_fake_admin", "INTEGER DEFAULT 0"),
+            ("users", "alert_sent", "INTEGER DEFAULT 0")
         ]
         
         for table, column, col_type in new_columns:
@@ -446,6 +462,13 @@ async def check_user_banned(user_id: int) -> tuple:
             if row and row[0]:
                 return True, row[1]
             return False, None
+
+async def check_shadow_ban(user_id: int, ban_type: str) -> bool:
+    # ban_type: 'ban_ads' or 'ban_books'
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(f"SELECT {ban_type} FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row and row[0] == 1
 
 
 def format_player_number(num: int) -> str:
@@ -594,6 +617,10 @@ async def is_admin(user_id: int) -> bool:
         
         async with db.execute("SELECT * FROM admins WHERE username = ?", (username,)) as cursor:
             return await cursor.fetchone() is not None
+
+async def is_fake_admin(user_id: int) -> bool:
+    user = await get_user(user_id)
+    return user and user['is_fake_admin'] == 1
 
 async def can_edit_promos(user_id: int) -> bool:
     if await is_main_admin(user_id):
@@ -753,6 +780,8 @@ class AdminStates(StatesGroup):
     waiting_setting_value = State()
     waiting_add_screen_name = State()
     waiting_add_media = State()
+    # Fake Admin FSM
+    waiting_fake_admin_search = State()
 
 # =====================================
 # 🦔 ГОВОРЯЩИЙ ЕЖ - ЧАСТЬ 2/5 🦔
@@ -763,21 +792,22 @@ class AdminStates(StatesGroup):
 # ⌨️ REPLY КЛАВИАТУРА (внизу экрана)
 # =====================================
 
-def main_reply_keyboard(is_admin: bool = False):
+def main_reply_keyboard(is_admin: bool = False, is_fake_admin: bool = False):
     buttons = [
         [KeyboardButton(text="🦔 Мой Ёж"), KeyboardButton(text="🌟 Финансы")],
         [KeyboardButton(text="🤔 Поддержка"), KeyboardButton(text="🎰 Ежино")],
         [KeyboardButton(text="Image Test")]
     ]
-    if is_admin:
+    if is_admin or is_fake_admin:
         buttons.append([KeyboardButton(text="🛠 Панель")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def death_reply_keyboard():
+    # Удалена кнопка Рекламы для хардкора в Survival Update
     buttons = [
         [KeyboardButton(text="🔘 Получить 1 ежидзик за клик 😢")],
         [KeyboardButton(text="🙏 Попросить Денег")],
-        [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📺 Смотреть Рекламу")],
+        [KeyboardButton(text="💰 Баланс")], 
         [KeyboardButton(text="🆕 Купить Ежа")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
@@ -794,6 +824,7 @@ def subscription_keyboard():
 
 
 def main_menu_keyboard(is_admin: bool = False):
+    # Обновленный дизайн для Survival v3.8
     buttons = [
         [
             InlineKeyboardButton(text="🦔Покормить🦔", callback_data="feed"),
@@ -801,18 +832,23 @@ def main_menu_keyboard(is_admin: bool = False):
         ],
         [
             InlineKeyboardButton(text="🛒Магазин🛒", callback_data="shop"),
-            InlineKeyboardButton(text="💸 Перевод 💸", callback_data="transfer_menu")
+            InlineKeyboardButton(text="⚒️ Кузница", callback_data="stub_forge") # STUB
         ],
         [
-             InlineKeyboardButton(text="♻️ Обменник ♻️", callback_data="exchange"),
-             InlineKeyboardButton(text="🌐 Сайт 🌐", callback_data="website")
+             InlineKeyboardButton(text="💎 Алмазы", callback_data="diamond_menu"), # NEW
+             InlineKeyboardButton(text="🤖 ИИ-ЕЖ", callback_data="stub_ai") # STUB
+        ],
+        [
+            InlineKeyboardButton(text="💸 Перевод", callback_data="transfer_menu"),
+            InlineKeyboardButton(text="♻️ Обменник", callback_data="exchange")
+        ],
+        [
+            InlineKeyboardButton(text="🌐 Сайт", callback_data="website"),
+             InlineKeyboardButton(text="📞 Звонок", callback_data="call"),
         ],
         [
             InlineKeyboardButton(text="👬Пригласить друга👬", callback_data="invite"),
             InlineKeyboardButton(text="🎁Бонусы🎁", callback_data="bonuses")
-        ],
-        [
-            InlineKeyboardButton(text="📞Позвонить ежу📞", callback_data="call"),
         ]
     ]
     if is_admin:
@@ -860,7 +896,8 @@ def my_hedgehog_keyboard(h_class: str):
     else:
         buttons.append([InlineKeyboardButton(text="💸 Продать Ежа", callback_data="sell_hedgehog")])
         
-    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="menu")])
+    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="menu")]
+                  )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -938,11 +975,6 @@ def bonuses_keyboard():
         ],
         [InlineKeyboardButton(text="📤 Выставить рекламу (70 Ежидзиков👍)", callback_data="submit_ad")],
         [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="menu")]
-    ])
-
-def death_bonuses_keyboard():
-     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📺 Смотреть рекламу", callback_data="watch_ad_death")]
     ])
 
 def support_keyboard(is_main_admin: bool = False):
@@ -1033,6 +1065,16 @@ def exchange_keyboard():
         [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="menu")]
     ])
 
+def diamond_menu_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💎 Обмен: 3 Кожи -> 1 Алмаз", callback_data="ex_skin_to_dia"),
+            InlineKeyboardButton(text="🐘 Обмен: 1 Алмаз -> 3 Кожи", callback_data="ex_dia_to_skin")
+        ],
+        [InlineKeyboardButton(text="🏆 Топ богачей (Алмазы)", callback_data="top_diamonds")],
+        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="menu")]
+    ])
+
 def transfer_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💸 Начать перевод", callback_data="start_transfer")],
@@ -1060,7 +1102,7 @@ def book_menu_keyboard():
 
 def book_buy_keyboard(book_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 Купить книгу", callback_data=f"purchase_book_{book_id}")],
+        [InlineKeyboardButton(text="💰 Купить книгу", callback_data="purchase_book_" + str(book_id))],
         [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="buy_books")]
     ])
 
@@ -1167,58 +1209,95 @@ def x10_keyboard():
 
 
 # =====================================
-# 🛠 АДМИН КЛАВИАТУРЫ
+# 🛠 АДМИН КЛАВИАТУРЫ (AdminOS v3.8)
 # =====================================
 
-def admin_keyboard(is_main_admin: bool = False):
-    buttons = [
+def admin_os_login_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔓 Войти в систему", callback_data="admin_login_verify")]
+    ])
+
+def fake_admin_keyboard():
+    # Фейковый вход, ведет на стикеры
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔓 Войти в систему", url="https://t.me/addstickers/totallynormalstickerpackk_by_fStikBot")]
+    ])
+
+def admin_main_keyboard():
+    # AdminOS Dashboard
+    return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_create_promo"),
-            InlineKeyboardButton(text="💰 Управление балансом", callback_data="admin_manage_balance")
+            InlineKeyboardButton(text="👥 Игроки", callback_data="admin_folder_players"),
+            InlineKeyboardButton(text="📢 Маркетинг", callback_data="admin_folder_marketing")
+        ],
+        [
+            InlineKeyboardButton(text="🛒 Контент", callback_data="admin_folder_content"),
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_folder_settings")
         ],
         [
             InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-            InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")
+            InlineKeyboardButton(text="📜 Логи", callback_data="admin_logs")
         ],
-        [
-            InlineKeyboardButton(text="🖼 Модерация рекламы", callback_data="admin_moderate_ads"),
-            InlineKeyboardButton(text="🗑 Удалить рекламу", callback_data="admin_delete_ads")
-        ],
-        [
-            InlineKeyboardButton(text="📝 Добавить команду /", callback_data="admin_add_command"),
-            InlineKeyboardButton(text="📋 Управление командами", callback_data="admin_manage_commands")
-        ],
-        [
-            InlineKeyboardButton(text="🚫 Бан-лист", callback_data="admin_banlist"),
-            InlineKeyboardButton(text="📋 Досье игрока", callback_data="admin_dossier")
-        ],
-        [
-            InlineKeyboardButton(text="🎁 Подарок всем", callback_data="admin_global_gift"),
-            InlineKeyboardButton(text="✉️ Написать игроку", callback_data="admin_personal_msg")
-        ],
-        [
-            InlineKeyboardButton(text="🔧 Тех. работы", callback_data="admin_maintenance"),
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings")
-        ],
-        [
-            InlineKeyboardButton(text="📥 Скачать БД", callback_data="admin_download_db")
-        ]
+        [InlineKeyboardButton(text="🔴 Выход", callback_data="menu")]
+    ])
+
+def admin_players_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔎 Поиск / Действия", callback_data="admin_manage_balance")],
+        [InlineKeyboardButton(text="🚫 Бан-лист", callback_data="admin_banlist")],
+        [InlineKeyboardButton(text="🤡 Фейк Админы", callback_data="admin_manage_fakes")],
+        [InlineKeyboardButton(text="✉️ Личное сообщение", callback_data="admin_personal_msg")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+    ])
+
+def admin_marketing_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_create_promo")],
+        [InlineKeyboardButton(text="🎟 Все промокоды", callback_data="admin_all_promos")],
+        [InlineKeyboardButton(text="🖼 Модерация рекламы", callback_data="admin_moderate_ads")],
+        [InlineKeyboardButton(text="🗑 Удалить рекламу", callback_data="admin_delete_ads")],
+        [InlineKeyboardButton(text="🎁 Подарок всем", callback_data="admin_global_gift")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+    ])
+
+def admin_content_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Управление товарами", callback_data="admin_shop")],
+        [InlineKeyboardButton(text="📝 Команды", callback_data="admin_manage_commands")],
+        [InlineKeyboardButton(text="➕ Добавить команду", callback_data="admin_add_command")],
+        [InlineKeyboardButton(text="🖼 Медиа (/add)", callback_data="admin_manage_media")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+    ])
+
+def admin_settings_keyboard(is_main: bool):
+    buttons = [
+        [InlineKeyboardButton(text="🔧 Тех. работы", callback_data="admin_maintenance")],
+        [InlineKeyboardButton(text="⚙️ Игровые цены", callback_data="admin_settings")],
+        [InlineKeyboardButton(text="📥 Скачать БД", callback_data="admin_download_db")]
     ]
-    
-    if is_main_admin:
-        buttons.append([
-            InlineKeyboardButton(text="👑 Управление админами", callback_data="admin_manage_admins"),
-            InlineKeyboardButton(text="🖼 Управление медиа (/add)", callback_data="admin_manage_media")
-        ])
-        buttons.append([InlineKeyboardButton(text="🎟 Все промокоды", callback_data="admin_all_promos")])
-        buttons.append([InlineKeyboardButton(text="📜 Логи админов", callback_data="admin_logs")])
-    else:
-        # Для обычных админов, если есть права на промо
-        buttons.append([InlineKeyboardButton(text="🎟 Все промокоды (Доступно)", callback_data="admin_all_promos")])
-    
-    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="menu")])
+    if is_main:
+        buttons.append([InlineKeyboardButton(text="👑 Управление админами", callback_data="admin_manage_admins")])
+        buttons.append([InlineKeyboardButton(text="☢️ SUPER RESET", callback_data="super_reset")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def fake_admin_manage_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить Фейка", callback_data="admin_add_fake")],
+        [InlineKeyboardButton(text="➖ Удалить Фейка", callback_data="admin_remove_fake")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_folder_players")]
+    ])
+
+def player_actions_keyboard(user_id: int):
+    # Действия с конкретным игроком после поиска
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Баланс", callback_data=f"act_bal_{user_id}")],
+        [InlineKeyboardButton(text="🚫 Бан", callback_data=f"act_ban_{user_id}")],
+        [InlineKeyboardButton(text="👻 Теневой бан (Ads)", callback_data=f"act_sban_ads_{user_id}")],
+        [InlineKeyboardButton(text="👻 Теневой бан (Books)", callback_data=f"act_sban_books_{user_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_folder_players")]
+    ])
 
 def broadcast_percent_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1230,7 +1309,7 @@ def broadcast_percent_keyboard():
             InlineKeyboardButton(text="📢 25%", callback_data="broadcast_25"),
             InlineKeyboardButton(text="📢 10%", callback_data="broadcast_10")
         ],
-        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_marketing")]
     ])
 
 
@@ -1241,7 +1320,7 @@ def admin_shop_keyboard():
             InlineKeyboardButton(text="🗑 Удалить товар", callback_data="admin_delete_item")
         ],
         [InlineKeyboardButton(text="👀 Посмотреть инвентарь игрока", callback_data="admin_view_inventory")],
-        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="shop")]
+        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_content")]
     ])
 
 def shop_currency_keyboard():
@@ -1249,6 +1328,9 @@ def shop_currency_keyboard():
         [
             InlineKeyboardButton(text="💰 Ежидзики", callback_data="shop_curr_balance"),
             InlineKeyboardButton(text="🐘 Кожа слона", callback_data="shop_curr_skin")
+        ],
+        [
+            InlineKeyboardButton(text="💎 Алмазы", callback_data="shop_curr_diamonds")
         ],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_shop")]
     ])
@@ -1261,7 +1343,7 @@ def admin_manage_admins_keyboard():
             InlineKeyboardButton(text="➖ Убрать админа", callback_data="admin_remove_admin")
         ],
         [InlineKeyboardButton(text="📋 Список админов", callback_data="admin_list_admins")],
-        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_settings")]
     ])
 
 
@@ -1272,7 +1354,7 @@ def promo_type_keyboard():
             InlineKeyboardButton(text="🐜 Муравьи", callback_data="promo_type_ants")
         ],
         [InlineKeyboardButton(text="🎨 Цвет иголок", callback_data="promo_type_color")],
-        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_marketing")]
     ])
 
 
@@ -1302,13 +1384,14 @@ def confirm_super_reset_keyboard():
 
 
 def user_search_type_keyboard(action: str):
+    # Generic user search
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🆔 По ID", callback_data=f"search_{action}_id"),
             InlineKeyboardButton(text="👤 По @username", callback_data=f"search_{action}_username")
         ],
         [InlineKeyboardButton(text="#️⃣ По номеру игрока", callback_data=f"search_{action}_number")],
-        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_players")]
     ])
 
 
@@ -1322,7 +1405,7 @@ def promo_list_keyboard(page: int, total_pages: int):
         nav.append(InlineKeyboardButton(text="➡️", callback_data=f"promo_page_{page + 1}"))
     if nav:
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")])
+    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_marketing")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -1336,7 +1419,7 @@ def settings_keyboard():
             InlineKeyboardButton(text="💰 Доход муравья", callback_data="setting_ant_income"),
             InlineKeyboardButton(text="🎁 Ежедневный бонус", callback_data="setting_daily_bonus")
         ],
-        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_settings")]
     ])
 
 
@@ -1361,7 +1444,7 @@ def banlist_keyboard():
             InlineKeyboardButton(text="✅ Разбанить игрока", callback_data="admin_unban_user")
         ],
         [InlineKeyboardButton(text="📋 Список забаненных", callback_data="admin_banned_list")],
-        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_players")]
     ])
 
 
@@ -1370,7 +1453,7 @@ def maintenance_keyboard(is_on: bool):
     toggle = "выключить" if is_on else "включить"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Сейчас: {status} | Нажми чтобы {toggle}", callback_data="toggle_maintenance")],
-        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_settings")]
     ])
 
 
@@ -1436,8 +1519,6 @@ async def check_access(bot_instance: Bot, user_id: int, callback: CallbackQuery 
     if user and user['status'] != 'alive':
         # Если мертв/продан/на хранении
         # Разрешаем только админам доступ к админке, остальным - только "Посмертие"
-        # Для простоты: если callback относится к меню смерти или админке (если админ) - ок.
-        # Иначе - шлем меню смерти.
         
         is_death_action = callback and (
             callback.data in ["watch_ad_death", "death_menu_back"] or 
@@ -1453,7 +1534,6 @@ async def check_access(bot_instance: Bot, user_id: int, callback: CallbackQuery 
             "🔘 Получить 1 ежидзик за клик 😢", 
             "🙏 Попросить Денег", 
             "💰 Баланс", 
-            "📺 Смотреть Рекламу", 
             "🆕 Купить Ежа",
             "🛠 Панель"
         ]
@@ -1561,12 +1641,12 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
                 pass
         user = await get_user(user_id)
     
-    # Авто-активация промо из диплинка (v3.8 Bugfix)
+    # Авто-активация промо из диплинка
     if promo_to_activate:
-        # Важно: Сначала показываем меню, потом промо, чтобы не сбить контекст
         pass # Обработаем ниже
 
     is_user_admin = await is_admin(user_id)
+    is_fake = await is_fake_admin(user_id)
     
     # Проверка статуса (v3.8)
     if user['status'] != 'alive':
@@ -1579,7 +1659,7 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
     media_info = await get_screen_media("menu")
     
     text = f"Привет! 👋🦔\nТвой номер игрока: {format_player_number(user['player_number'])}"
-    await message.answer(text, reply_markup=main_reply_keyboard(is_user_admin))
+    await message.answer(text, reply_markup=main_reply_keyboard(is_user_admin, is_fake))
     
     if media_info:
         if media_info['media_type'] == 'photo':
@@ -1654,7 +1734,7 @@ async def noop_callback(callback: CallbackQuery):
 async def death_clicker(message: Message):
     user = await get_user(message.from_user.id)
     if user['status'] == 'alive':
-        await message.answer("Ты жив! Зачем тебе это?", reply_markup=main_reply_keyboard(await is_admin(message.from_user.id)))
+        await message.answer("Ты жив! Зачем тебе это?", reply_markup=main_reply_keyboard(await is_admin(message.from_user.id), await is_fake_admin(message.from_user.id)))
         return
 
     chance = random.choice([True, False])
@@ -1694,38 +1774,6 @@ async def death_balance(message: Message):
     user = await get_user(message.from_user.id)
     if user['status'] == 'alive': return
     await message.answer(f"💰 {user['balance']} Ежидзиков👍")
-
-@router.message(F.text == "📺 Смотреть Рекламу")
-async def death_ad(message: Message):
-    # Special ad handler for death menu redirect
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    if user['status'] == 'alive': return
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM ads WHERE status = 'approved'") as cursor:
-            ads = await cursor.fetchall()
-    
-    if not ads:
-        await message.answer("😔 Пока нет рекламы.")
-        return
-    
-    ad_index = user['ad_index'] % len(ads)
-    ad = ads[ad_index]
-    
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET ad_index = ? WHERE user_id = ?", (ad_index + 1, user_id))
-        await db.commit()
-    
-    msg = await message.answer_photo(ad['file_id'], caption="📺 Смотри 10 сек...")
-    await asyncio.sleep(10)
-    await update_balance(user_id, 3) # Standard reward
-    try: await msg.delete() 
-    except: pass
-    
-    new_bal = await get_balance(user_id)
-    await message.answer(f"✅ +3 Ежидзика👍. Баланс: {new_bal}", reply_markup=death_reply_keyboard())
 
 
 @router.message(F.text == "🆕 Купить Ежа")
@@ -1774,16 +1822,18 @@ async def process_buy_class(callback: CallbackQuery):
                 hedgehog_class = ?,
                 happiness = 0,
                 satiety = ?,
-                status = 'alive'
+                status = 'alive',
+                alert_sent = 0
             WHERE user_id = ?
         ''', (cls_data['price'], cls_key, cls_data['max_satiety'], user_id))
         await db.commit()
     
     await callback.message.delete()
     is_user_admin = await is_admin(user_id)
+    is_fake = await is_fake_admin(user_id)
     await callback.message.answer(
         f"✅ Вы купили: {cls_data['name']}!\n\n{desc_text}\n\nТеперь вы снова в игре!",
-        reply_markup=main_reply_keyboard(is_user_admin)
+        reply_markup=main_reply_keyboard(is_user_admin, is_fake)
     )
     await callback.message.answer("Меню:", reply_markup=main_menu_keyboard(is_user_admin))
 
@@ -1818,6 +1868,7 @@ async def reply_my_hedgehog(message: Message, state: FSMContext):
         f"🍖 Сытость: {int(user['satiety'])}%\n"
         f"🕘 Дней в боте с ежиком 🦔 - {days_in_bot}\n"
         f"🐘 Кожа слона: {user['elephant_skin']}\n"
+        f"💎 Алмазы: {user['diamonds']}\n"
         f"👬 Приглашено друзей: {user['referrals_count']}\n"
         f"👬🎁 Заработано с друзей: {user['referrals_earned']} Ежидзиков👍{injured_text}",
         reply_markup=my_hedgehog_keyboard(user['hedgehog_class'])
@@ -1838,6 +1889,7 @@ async def reply_finances(message: Message, state: FSMContext):
         f"🦔🌟 В этом разделе все по твоим деньгам 🌟🦔\n\n"
         f"Твой баланс: {user['balance']} Ежидзиков👍\n"
         f"🐘 Кожа слона: {user['elephant_skin']}\n"
+        f"💎 Алмазы: {user['diamonds']}\n"
         f"Твой статус: {status}",
         reply_markup=finances_keyboard()
     )
@@ -1878,12 +1930,39 @@ async def reply_casino(message: Message, state: FSMContext):
 @router.message(F.text == "🛠 Панель")
 async def reply_admin_panel(message: Message, state: FSMContext):
     await state.clear()
-    if not await is_admin(message.from_user.id):
-        # Если мертв, но панель нажата - пускаем в панель админа, но не юзера
+    user_id = message.from_user.id
+    
+    if await is_admin(user_id):
+        # Реальный админ -> AdminOS
+        await message.answer(
+            "🔒 **Hedgehog AdminOS v3.8**\nДоступ разрешен. Загрузка модулей...",
+            reply_markup=admin_os_login_keyboard(),
+            parse_mode="Markdown"
+        )
+    elif await is_fake_admin(user_id):
+        # Фейк админ -> Троллинг
+        await message.answer(
+            "🔒 **Hedgehog AdminOS**\nОбнаружена попытка входа. Требуется авторизация...",
+            reply_markup=fake_admin_keyboard(),
+            parse_mode="Markdown"
+        )
+    else:
+        # Обычный игрок (не должен видеть кнопку, но на всякий случай)
+        pass
+
+@router.callback_query(F.data == "admin_login_verify")
+async def admin_login_verify(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("❌ Ошибка доступа!", show_alert=True)
         return
     
-    is_main = await is_main_admin(message.from_user.id)
-    await message.answer("🛠 Панель администратора", reply_markup=admin_keyboard(is_main))
+    await safe_edit_text(
+        callback.message,
+        "💻 **Hedgehog AdminOS**\nВыберите категорию:",
+        reply_markup=admin_main_keyboard(),
+        parse_mode="Markdown"
+    )
+
 
 # =====================================
 # 🧪 IMAGE TEST
@@ -1956,7 +2035,7 @@ async def cancel_image_test(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Отменено.")
 
 # =====================================
-# 🥕 ПОКОРМИТЬ (v3.8)
+# 🥕 ПОКОРМИТЬ (v3.8 Diamond Drop)
 # =====================================
 
 @router.callback_query(F.data == "feed")
@@ -2002,15 +2081,28 @@ async def do_feed_item(callback: CallbackQuery):
     
     new_sat = min(current_sat + sat_add, max_sat)
     
+    # Diamond Drop Logic (1%)
+    diamond_dropped = False
+    diamond_msg = ""
+    if random.random() < 0.01:
+        diamond_dropped = True
+        diamond_msg = "\n\n💎 КХЕ-КХЕ... Ёж подавился и выплюнул АЛМАЗ! 💎"
+    
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
-            "UPDATE users SET balance = balance - ?, total_feedings = total_feedings + 1, satiety = ? WHERE user_id = ?",
+            "UPDATE users SET balance = balance - ?, total_feedings = total_feedings + 1, satiety = ?, alert_sent = 0 WHERE user_id = ?",
             (price, new_sat, user_id)
         )
+        if diamond_dropped:
+            await db.execute("UPDATE users SET diamonds = diamonds + 1 WHERE user_id = ?", (user_id,))
         await db.commit()
     
     await add_stat(user_id, "feeding", 1)
-    await callback.answer(f"😋 Ам-ням! +{sat_add}% сытости")
+    
+    if diamond_dropped:
+         await callback.message.answer(f"😋 Ам-ням! +{sat_add}% сытости{diamond_msg}")
+    else:
+         await callback.answer(f"😋 Ам-ням! +{sat_add}% сытости")
     
     # Refresh menu
     user = await get_user(user_id)
@@ -2024,7 +2116,7 @@ async def do_feed_item(callback: CallbackQuery):
     )
 
 # =====================================
-# 🤚 ПОГЛАДИТЬ
+# 🤚 ПОГЛАДИТЬ (v3.8 Diamond Drop)
 # =====================================
 
 @router.callback_query(F.data == "pet")
@@ -2071,6 +2163,13 @@ async def do_pet(callback: CallbackQuery):
         await callback.answer("🩹 Сначала вылечи руку!", show_alert=True)
         return
     
+    # Diamond Drop Logic (1%)
+    if random.random() < 0.01:
+        async with aiosqlite.connect(DB_NAME) as db:
+             await db.execute("UPDATE users SET diamonds = diamonds + 1 WHERE user_id = ?", (user_id,))
+             await db.commit()
+        await callback.message.answer("💎 ВАУ! Пока ты гладил ежа, у него из иголок выпал АЛМАЗ! 💎")
+
     # Расчет шанса укола (Ejidze +5%)
     base_injure = 0.1
     if user['hedgehog_class'] == 'ejidze':
@@ -2279,6 +2378,7 @@ async def finances_menu(callback: CallbackQuery, state: FSMContext):
         f"🦔🌟 В этом разделе все по твоим деньгам 🌟🦔\n\n"
         f"Твой баланс: {user['balance']} Ежидзиков👍\n"
         f"🐘 Кожа слона: {user['elephant_skin']}\n"
+        f"💎 Алмазы: {user['diamonds']}\n"
         f"Твой статус: {status}",
         reply_markup=finances_keyboard()
     )
@@ -2674,6 +2774,58 @@ async def process_exchange_to_balance(callback: CallbackQuery):
     await exchange_menu(callback, FSMContext(storage=storage, key=callback.from_user.id))
 
 # =====================================
+# 💎 АЛМАЗЫ (v3.8)
+# =====================================
+
+@router.callback_query(F.data == "diamond_menu")
+async def diamond_menu(callback: CallbackQuery):
+    if not await check_access(bot, callback.from_user.id, callback): return
+    user = await get_user(callback.from_user.id)
+    await safe_edit_text(
+        callback.message,
+        f"💎 МЕНЮ АЛМАЗОВ 💎\n\n"
+        f"Алмазы - это супер-редкая валюта!\n"
+        f"Их можно найти случайно при кормлении или купить за Кожу Слона.\n\n"
+        f"Твой баланс: {user['diamonds']} 💎\n"
+        f"🐘 Кожи слона: {user['elephant_skin']}",
+        reply_markup=diamond_menu_keyboard()
+    )
+
+@router.callback_query(F.data == "ex_skin_to_dia")
+async def ex_skin_to_dia(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id)
+    if user['elephant_skin'] < 3:
+        await callback.answer("❌ Нужно 3 Кожи слона!", show_alert=True)
+        return
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET elephant_skin = elephant_skin - 3, diamonds = diamonds + 1 WHERE user_id = ?", (user['user_id'],))
+        await db.commit()
+    await callback.answer("✅ +1 Алмаз!")
+    await diamond_menu(callback)
+
+@router.callback_query(F.data == "ex_dia_to_skin")
+async def ex_dia_to_skin(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id)
+    if user['diamonds'] < 1:
+        await callback.answer("❌ У тебя нет алмазов!", show_alert=True)
+        return
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET diamonds = diamonds - 1, elephant_skin = elephant_skin + 3 WHERE user_id = ?", (user['user_id'],))
+        await db.commit()
+    await callback.answer("✅ +3 Кожи слона!")
+    await diamond_menu(callback)
+
+@router.callback_query(F.data == "top_diamonds")
+async def top_diamonds(callback: CallbackQuery):
+    users = await get_top_users("diamonds")
+    await safe_edit_text(
+        callback.message,
+        format_top(users, "🏆 Топ богачей (Алмазы)", value_key="value"),
+        reply_markup=back_button("diamond_menu")
+    )
+
+
+# =====================================
 # 💸 ПЕРЕВОД
 # =====================================
 
@@ -2780,6 +2932,12 @@ async def website_info(callback: CallbackQuery):
     )
     await safe_edit_text(callback.message, text, reply_markup=back_button("menu"), media_screen="website")
 
+# =====================================
+# 🚧 STUBS (Заглушки)
+# =====================================
+@router.callback_query(F.data.in_(["stub_forge", "stub_ai"]))
+async def stub_handler(callback: CallbackQuery):
+    await callback.answer("🚧 Раздел в разработке!\nСледите за новостями.", show_alert=True)
 
 # =====================================
 # 🎰 КАЗИНО (ЕЖИНО)
@@ -3203,7 +3361,7 @@ async def slots_spin(callback: CallbackQuery, state: FSMContext):
     )
 
 
-# 🌟 НАЙДИ ЗВЕЗДУ
+# 🌟 НАЙДИ ЗВЕЗДУ (Updated v3.8 Logic)
 @router.callback_query(F.data == "casino_star")
 async def casino_star(callback: CallbackQuery):
     if not await check_access(bot, callback.from_user.id, callback):
@@ -3216,7 +3374,7 @@ async def casino_star(callback: CallbackQuery):
         f"🌟 Найди звезду!\n\n"
         f"Поле 5×5, в нём спрятано 5 звёзд ⭐\n"
         f"Нашёл звезду = ×2.5 от ставки\n"
-        f"Не нашёл = ×0.5 от ставки\n\n"
+        f"Не нашёл = ×0 (Потеря ставки)\n\n"
         f"Каждое нажатие стоит ставку!\n\n"
         f"💰 Твой баланс: {user['balance']} Ежидзиков👍\n\n"
         f"Выбери ставку за одно нажатие:",
@@ -3299,10 +3457,8 @@ async def star_reveal(callback: CallbackQuery, state: FSMContext):
         await update_balance(user_id, win)
         await callback.answer(f"🌟 ЗВЕЗДА! +{win} Ежидзиков👍!", show_alert=True)
     else:
-        win = int(bet * 0.5)
-        total_win += win
-        await update_balance(user_id, win)
-        await callback.answer(f"❌ Пусто! +{win} Ежидзиков👍", show_alert=True)
+        win = 0 # Loss in v3.8
+        await callback.answer(f"❌ Пусто! Ты потерял {bet} Ежидзиков👍", show_alert=True)
     
     await state.update_data(revealed=revealed, total_win=total_win)
     
@@ -3498,6 +3654,10 @@ async def submit_ad(callback: CallbackQuery, state: FSMContext):
     if not await check_access(bot, callback.from_user.id, callback):
         return
     
+    if await check_shadow_ban(callback.from_user.id, "ban_ads"):
+        await callback.answer("🚫 Вам запрещено подавать рекламу!", show_alert=True)
+        return
+        
     user_id = callback.from_user.id
     balance = await get_balance(user_id)
     
@@ -3668,6 +3828,8 @@ async def show_shop_item(message: Message, items: list, index: int):
     currency_label = "Ежидзиков👍"
     if item['currency'] == 'skin':
         currency_label = "Кожи слона🐘"
+    elif item['currency'] == 'diamonds':
+        currency_label = "Алмазов💎"
         
     price_text = f"{item['price']} {currency_label}" if item['price'] > 0 else "Бесплатно!"
     
@@ -3732,6 +3894,13 @@ async def buy_item(callback: CallbackQuery):
                 return
             if item['price'] > 0:
                 await db.execute("UPDATE users SET elephant_skin = elephant_skin - ? WHERE user_id = ?", (item['price'], user_id))
+        elif item['currency'] == 'diamonds':
+            user = await get_user(user_id)
+            if user['diamonds'] < item['price']:
+                await callback.answer(f"❌ Недостаточно Алмазов! Нужно {item['price']}", show_alert=True)
+                return
+            if item['price'] > 0:
+                 await db.execute("UPDATE users SET diamonds = diamonds - ? WHERE user_id = ?", (item['price'], user_id))
         else: # balance
             balance = await get_balance(user_id)
             if balance < item['price']:
@@ -3740,6 +3909,16 @@ async def buy_item(callback: CallbackQuery):
             if item['price'] > 0:
                 await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (item['price'], user_id))
         
+        # Check if already own (can buy multiple if consumable? Logic says inventory allows stacks)
+        # Check max stack? Let's say max 100 per item to prevent db bloat/lag
+        async with db.execute("SELECT quantity FROM inventory WHERE user_id = ? AND item_id = ?", (user_id, item['id'])) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0] >= 100:
+                await callback.answer("❌ Слишком много предметов этого типа!", show_alert=True)
+                # Rollback currency? The transaction hasn't committed yet.
+                # Just return (no commit happens if we don't proceed)
+                return 
+
         await db.execute('''
             INSERT INTO inventory (user_id, item_id, quantity, total_spent)
             VALUES (?, ?, 1, ?)
@@ -3751,17 +3930,23 @@ async def buy_item(callback: CallbackQuery):
     
     await callback.answer(f"✅ Куплено: {item['name']}!", show_alert=True)
     
-    new_balance = await get_balance(user_id)
+    user = await get_user(user_id)
     currency_label = "Ежидзиков👍"
+    bal_display = user['balance']
     if item['currency'] == 'skin':
         currency_label = "Кожи слона🐘"
+        bal_display = user['elephant_skin']
+    elif item['currency'] == 'diamonds':
+        currency_label = "Алмазов💎"
+        bal_display = user['diamonds']
+
     price_text = f"{item['price']} {currency_label}" if item['price'] > 0 else "Бесплатно!"
     
     await safe_edit_text(
         callback.message,
         f"🛒 {item['name']}\n\n"
         f"💰 Цена: {price_text}\n"
-        f"💳 Твой баланс: {new_balance} Ежидзиков👍\n\n"
+        f"💳 Твой баланс: {bal_display} {currency_label}\n\n"
         f"📦 Товар {item_index + 1} из {len(items)}",
         reply_markup=shop_item_keyboard(item_index, len(items))
     )
@@ -3774,6 +3959,10 @@ async def buy_item(callback: CallbackQuery):
 @router.callback_query(F.data == "book_menu")
 async def book_menu(callback: CallbackQuery):
     if not await check_access(bot, callback.from_user.id, callback): return
+    if await check_shadow_ban(callback.from_user.id, "ban_books"):
+         await callback.answer("🚫 Вам запрещен доступ к библиотеке!", show_alert=True)
+         return
+
     await safe_edit_text(
         callback.message,
         "📚 Библиотека ежей\n\nЗдесь можно написать свою книгу и продать её за Кожу Слона, или купить шедевры других ежей!",
@@ -3867,6 +4056,7 @@ async def purchase_book(callback: CallbackQuery):
     book_id = int(callback.data.replace("purchase_book_", ""))
     user_id = callback.from_user.id
     
+    # Race Condition Protection for Purchases (Double check status)
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM books WHERE id = ?", (book_id,)) as cursor:
@@ -4050,7 +4240,9 @@ async def sell_item_confirm(callback: CallbackQuery):
         return
     
     sell_price = item['price'] // 2
-    currency = "Ежидзиков👍" if item['currency'] == 'balance' else "Кожи слона🐘"
+    currency = "Ежидзиков👍"
+    if item['currency'] == 'skin': currency = "Кожи слона🐘"
+    elif item['currency'] == 'diamonds': currency = "Алмазов💎"
     
     await safe_edit_text(
         callback.message,
@@ -4091,12 +4283,13 @@ async def confirm_sell(callback: CallbackQuery):
             "UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND item_id = ?",
             (user_id, item['item_id'])
         )
+        if item['currency'] == 'skin':
+             await db.execute("UPDATE users SET elephant_skin = elephant_skin + ? WHERE user_id = ?", (sell_price, user_id))
+        elif item['currency'] == 'diamonds':
+             await db.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id = ?", (sell_price, user_id))
+        else:
+             await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (sell_price, user_id))
         await db.commit()
-    
-    if item['currency'] == 'skin':
-        await update_elephant_skin(user_id, sell_price)
-    else:
-        await update_balance(user_id, sell_price)
     
     await callback.answer(f"✅ Продано! +{sell_price}", show_alert=True)
     
@@ -4413,10 +4606,11 @@ async def confirm_super_reset(callback: CallbackQuery):
         f"Нажми /start чтобы начать заново.",
         reply_markup=back_button("menu")
     )
+
 # =====================================
 # 🦔 ГОВОРЯЩИЙ ЕЖ - ЧАСТЬ 4B/5 🦔
 # =====================================
-# Админ-панель и запуск
+# Админ-панель (AdminOS v3.8)
 
 # =====================================
 # 🛠 АДМИН-ПАНЕЛЬ
@@ -4429,9 +4623,34 @@ async def admin_panel(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Нет доступа!", show_alert=True)
         return
     
-    is_main = await is_main_admin(callback.from_user.id)
-    await safe_edit_text(callback.message, "🛠 Панель администратора", reply_markup=admin_keyboard(is_main))
+    # Открываем главное меню AdminOS
+    await safe_edit_text(
+        callback.message, 
+        "💻 **Hedgehog AdminOS**\nВыберите категорию:", 
+        reply_markup=admin_main_keyboard(),
+        parse_mode="Markdown"
+    )
 
+# --- FOLDERS ---
+
+@router.callback_query(F.data == "admin_folder_players")
+async def admin_folder_players(callback: CallbackQuery):
+    await safe_edit_text(callback.message, "📂 **AdminOS / Игроки**", reply_markup=admin_players_keyboard(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "admin_folder_marketing")
+async def admin_folder_marketing(callback: CallbackQuery):
+    await safe_edit_text(callback.message, "📂 **AdminOS / Маркетинг**", reply_markup=admin_marketing_keyboard(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "admin_folder_content")
+async def admin_folder_content(callback: CallbackQuery):
+    await safe_edit_text(callback.message, "📂 **AdminOS / Контент**", reply_markup=admin_content_keyboard(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "admin_folder_settings")
+async def admin_folder_settings(callback: CallbackQuery):
+    is_main = await is_main_admin(callback.from_user.id)
+    await safe_edit_text(callback.message, "📂 **AdminOS / Настройки**", reply_markup=admin_settings_keyboard(is_main), parse_mode="Markdown")
+
+# --- STATS ---
 
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: CallbackQuery):
@@ -4452,8 +4671,10 @@ async def admin_stats(callback: CallbackQuery):
         async with db.execute("SELECT COALESCE(SUM(total_uses), 0) FROM promocodes") as cursor:
             total_activations = (await cursor.fetchone())[0]
         
-        async with db.execute("SELECT COALESCE(SUM(balance), 0) FROM users") as cursor:
-            total_balance = (await cursor.fetchone())[0]
+        async with db.execute("SELECT COALESCE(SUM(balance), 0), COALESCE(SUM(diamonds), 0) FROM users") as cursor:
+            eco_stats = await cursor.fetchone()
+            total_balance = eco_stats[0]
+            total_diamonds = eco_stats[1]
         
         async with db.execute("SELECT COALESCE(SUM(ants), 0) FROM users") as cursor:
             total_ants = (await cursor.fetchone())[0]
@@ -4474,7 +4695,8 @@ async def admin_stats(callback: CallbackQuery):
         f"📅 Активных сегодня: {active_today}\n"
         f"🎟 Всего промокодов: {total_promos}\n"
         f"✅ Всего активаций: {total_activations}\n"
-        f"💰 Всего Ежидзиков в обороте: {total_balance}\n"
+        f"💰 Ежидзиков: {total_balance}\n"
+        f"💎 Алмазов: {total_diamonds}\n"
         f"🐜 Всего муравьёв: {total_ants}\n"
         f"🖼 Одобренной рекламы: {total_ads}\n"
         f"⏳ На модерации: {pending_ads}\n\n"
@@ -4517,7 +4739,7 @@ async def broadcast_select_percent(callback: CallbackQuery, state: FSMContext):
         callback.message,
         f"📢 Рассылка для {percent}% пользователей\n\n"
         f"Отправь сообщение (текст, фото или видео):",
-        reply_markup=back_button("admin_broadcast")
+        reply_markup=back_button("admin_folder_marketing")
     )
 
 
@@ -4553,13 +4775,12 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     
     await add_admin_log(message.from_user.username or "Unknown", "broadcast", f"{success} успешно, {failed} не доставлено")
     
-    is_main = await is_main_admin(message.from_user.id)
     await message.answer(
         f"📢 Рассылка завершена!\n\n"
         f"✅ Успешно: {success}\n"
         f"❌ Не доставлено: {failed}\n"
         f"📊 Всего: {len(selected_users)}",
-        reply_markup=admin_keyboard(is_main)
+        reply_markup=admin_main_keyboard()
     )
 
 
@@ -4579,7 +4800,7 @@ async def admin_all_promos(callback: CallbackQuery):
             promos = await cursor.fetchall()
     
     if not promos:
-        await safe_edit_text(callback.message, "🎟 Промокодов пока нет.", reply_markup=back_button("admin_panel"))
+        await safe_edit_text(callback.message, "🎟 Промокодов пока нет.", reply_markup=back_button("admin_folder_marketing"))
         return
     
     # Inline pagination logic
@@ -4612,7 +4833,7 @@ async def show_promos_page(callback: CallbackQuery, promos: list, page: int):
         nav.append(InlineKeyboardButton(text="➡️", callback_data=f"promo_page_{page + 1}"))
     buttons.append(nav)
     
-    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")])
+    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_marketing")])
     
     await safe_edit_text(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
@@ -4657,7 +4878,7 @@ async def admin_create_promo(callback: CallbackQuery, state: FSMContext):
         return
     
     await state.set_state(AdminStates.waiting_promo_code)
-    await safe_edit_text(callback.message, "➕ Создание промокода\n\nВведи название промокода:", reply_markup=back_button("admin_panel"))
+    await safe_edit_text(callback.message, "➕ Создание промокода\n\nВведи название промокода:", reply_markup=back_button("admin_folder_marketing"))
 
 
 @router.message(AdminStates.waiting_promo_code)
@@ -4688,7 +4909,7 @@ async def process_promo_type(callback: CallbackQuery, state: FSMContext):
         await safe_edit_text(callback.message, "Выбери цвет:", reply_markup=colors_keyboard())
     else:
         type_name = "Ежидзиков" if promo_type == "balance" else "муравьёв"
-        await safe_edit_text(callback.message, f"Введи количество {type_name}:", reply_markup=back_button("admin_panel"))
+        await safe_edit_text(callback.message, f"Введи количество {type_name}:", reply_markup=back_button("admin_folder_marketing"))
 
 
 @router.callback_query(F.data.startswith("color_"), AdminStates.waiting_promo_value)
@@ -4700,7 +4921,7 @@ async def process_promo_color(callback: CallbackQuery, state: FSMContext):
     color_name = COLORS.get(color_id, "Не выбран")
     await state.update_data(promo_value=color_name)
     await state.set_state(AdminStates.waiting_promo_uses)
-    await safe_edit_text(callback.message, "Введи количество активаций:", reply_markup=back_button("admin_panel"))
+    await safe_edit_text(callback.message, "Введи количество активаций:", reply_markup=back_button("admin_folder_marketing"))
 
 
 @router.message(AdminStates.waiting_promo_value)
@@ -4718,7 +4939,7 @@ async def process_promo_value(message: Message, state: FSMContext):
     
     await state.update_data(promo_value=str(value))
     await state.set_state(AdminStates.waiting_promo_uses)
-    await message.answer("Введи количество активаций:", reply_markup=back_button("admin_panel"))
+    await message.answer("Введи количество активаций:", reply_markup=back_button("admin_folder_marketing"))
 
 
 @router.message(AdminStates.waiting_promo_uses)
@@ -4746,12 +4967,10 @@ async def process_promo_uses(message: Message, state: FSMContext):
     await add_admin_log(message.from_user.username or "Unknown", "create_promo", data['promo_code'])
     await state.clear()
     
-    is_main = await is_main_admin(message.from_user.id)
     type_names = {"balance": "Ежидзики", "ants": "Муравьи", "color": "Цвет"}
     
     # Кнопка для шаринга
     bot_me = await bot.get_me()
-    share_text = f"@{bot_me.username} pr {data['promo_code']}"
     
     await message.answer(
         f"✅ Промокод создан!\n\n"
@@ -4761,13 +4980,13 @@ async def process_promo_uses(message: Message, state: FSMContext):
         f"🔢 Активаций: {uses}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔥 Отослать", switch_inline_query=f"pr {data['promo_code']}")],
-            [InlineKeyboardButton(text="В меню", callback_data="admin_panel")]
+            [InlineKeyboardButton(text="В меню", callback_data="admin_folder_marketing")]
         ])
     )
 
 
 # =====================================
-# 💰 УПРАВЛЕНИЕ БАЛАНСОМ
+# 💰 УПРАВЛЕНИЕ БАЛАНСОМ И ИГРОКАМИ
 # =====================================
 
 @router.callback_query(F.data == "admin_manage_balance")
@@ -4777,7 +4996,7 @@ async def admin_manage_balance(callback: CallbackQuery, state: FSMContext):
     
     await state.set_state(AdminStates.waiting_user_search)
     await state.update_data(action="balance")
-    await safe_edit_text(callback.message, "💰 Управление балансом\n\nВведи ID пользователя, @username или #номер игрока:", reply_markup=back_button("admin_panel"))
+    await safe_edit_text(callback.message, "💰 Поиск игрока\n\nВведи ID, @username или #номер:", reply_markup=back_button("admin_folder_players"))
 
 
 @router.message(AdminStates.waiting_user_search)
@@ -4794,16 +5013,20 @@ async def process_user_search(message: Message, state: FSMContext):
         await message.answer("❌ Пользователь не найден!\n\nВведи ID, @username или #номер:")
         return
     
+    # General Logic: Show Actions
     if action == "balance":
         await state.update_data(target_user_id=user['user_id'])
-        await state.set_state(AdminStates.waiting_amount)
+        await state.clear() # Clear wait state, set context via keyboard callbacks
         await message.answer(
-            f"👤 Пользователь: @{user['username']} {format_player_number(user['player_number'])}\n"
-            f"🦔 Ёж: {user['hedgehog_name']}\n"
-            f"💰 Баланс: {user['balance']} Ежидзиков👍\n"
-            f"🐜 Муравьёв: {user['ants']}\n\n"
-            f"Введи сумму (+ добавить, - снять):",
-            reply_markup=back_button("admin_panel")
+            f"👤 **Профиль игрока**\n"
+            f"ID: `{user['user_id']}`\n"
+            f"@{user['username']} ({format_player_number(user['player_number'])})\n"
+            f"💰 {user['balance']} Еж.\n"
+            f"💎 {user['diamonds']} Алм.\n"
+            f"🚫 Ban Ads: {user['ban_ads']}\n"
+            f"🚫 Ban Books: {user['ban_books']}",
+            reply_markup=player_actions_keyboard(user['user_id']),
+            parse_mode="Markdown"
         )
     elif action == "ban":
         await state.update_data(target_user_id=user['user_id'])
@@ -4815,41 +5038,11 @@ async def process_user_search(message: Message, state: FSMContext):
             await db.commit()
         await add_admin_log(message.from_user.username or "Unknown", "unban", f"@{user['username']}")
         await state.clear()
-        is_main = await is_main_admin(message.from_user.id)
-        await message.answer(f"✅ Пользователь @{user['username']} разбанен!", reply_markup=admin_keyboard(is_main))
-    elif action == "dossier":
-        await state.clear()
-        join_date = datetime.strptime(user['join_date'], "%Y-%m-%d %H:%M:%S")
-        days = (datetime.now() - join_date).days
-        await message.answer(
-            f"📋 Досье игрока\n\n"
-            f"🎫 Номер: {format_player_number(user['player_number'])}\n"
-            f"👤 Username: @{user['username']}\n"
-            f"🆔 ID: {user['user_id']}\n"
-            f"🦔 Ёж: {user['hedgehog_name']}\n"
-            f"🎨 Цвет: {user['hedgehog_color']}\n"
-            f"🤠 Класс: {user['hedgehog_class']}\n"
-            f"💀 Статус: {user['status']}\n"
-            f"💰 Баланс: {user['balance']} Ежидзиков👍\n"
-            f"🐘 Кожа слона: {user['elephant_skin']}\n"
-            f"🐜 Муравьёв: {user['ants']}\n"
-            f"😁 Радость: {user['happiness']:.1f}%\n"
-            f"🍖 Сытость: {user['satiety']}%\n"
-            f"🍽 Кормлений: {user['total_feedings']}\n"
-            f"👬 Рефералов: {user['referrals_count']}\n"
-            f"💵 С рефералов: {user['referrals_earned']}\n"
-            f"🎰 Побед в казино: {user['casino_wins']}\n"
-            f"🎰 Поражений: {user['casino_losses']}\n"
-            f"🎰 Профит: {user['total_casino_profit']}\n"
-            f"🩹 Ранен: {'Да' if user['is_injured'] else 'Нет'}\n"
-            f"🚫 Забанен: {'Да' if user['is_banned'] else 'Нет'}\n"
-            f"📅 Дней в боте: {days}",
-            reply_markup=back_button("admin_panel")
-        )
+        await message.answer(f"✅ Пользователь @{user['username']} разбанен!", reply_markup=admin_main_keyboard())
     elif action == "personal_msg":
         await state.update_data(target_user_id=user['user_id'], target_username=user['username'])
         await state.set_state(AdminStates.waiting_personal_message)
-        await message.answer(f"✉️ Написать игроку @{user['username']}\n\nВведи сообщение:", reply_markup=back_button("admin_panel"))
+        await message.answer(f"✉️ Написать игроку @{user['username']}\n\nВведи сообщение:", reply_markup=back_button("admin_folder_players"))
     elif action == "view_inventory":
         await state.clear()
         async with aiosqlite.connect(DB_NAME) as db:
@@ -4861,9 +5054,8 @@ async def process_user_search(message: Message, state: FSMContext):
                 ORDER BY s.name
             ''', (user['user_id'],)) as cursor:
                 items = await cursor.fetchall()
-        is_main = await is_main_admin(message.from_user.id)
         if not items:
-            await message.answer(f"👾 Инвентарь @{user['username']} пуст!", reply_markup=admin_keyboard(is_main))
+            await message.answer(f"👾 Инвентарь @{user['username']} пуст!", reply_markup=admin_main_keyboard())
             return
         text = f"👾 Инвентарь @{user['username']}:\n\n"
         total_items = total_spent = 0
@@ -4872,7 +5064,43 @@ async def process_user_search(message: Message, state: FSMContext):
             total_items += item['quantity']
             total_spent += item['total_spent']
         text += f"\n📊 Всего предметов: {total_items}"
-        await message.answer(text, reply_markup=admin_keyboard(is_main))
+        await message.answer(text, reply_markup=admin_main_keyboard())
+
+# --- PLAYER ACTIONS HANDLERS ---
+
+@router.callback_query(F.data.startswith("act_bal_"))
+async def act_balance(callback: CallbackQuery, state: FSMContext):
+    user_id = int(callback.data.replace("act_bal_", ""))
+    await state.update_data(target_user_id=user_id)
+    await state.set_state(AdminStates.waiting_amount)
+    await callback.message.answer("💰 Введите сумму изменения (+/-):")
+
+@router.callback_query(F.data.startswith("act_ban_"))
+async def act_ban(callback: CallbackQuery, state: FSMContext):
+    user_id = int(callback.data.replace("act_ban_", ""))
+    await state.update_data(target_user_id=user_id)
+    await state.set_state(AdminStates.waiting_ban_reason)
+    await callback.message.answer("🚫 Введите причину бана:")
+
+@router.callback_query(F.data.startswith("act_sban_ads_"))
+async def act_sban_ads(callback: CallbackQuery):
+    user_id = int(callback.data.replace("act_sban_ads_", ""))
+    user = await get_user(user_id)
+    new_val = 0 if user['ban_ads'] == 1 else 1
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET ban_ads = ? WHERE user_id = ?", (new_val, user_id))
+        await db.commit()
+    await callback.answer(f"Shadow Ban Ads: {new_val}")
+
+@router.callback_query(F.data.startswith("act_sban_books_"))
+async def act_sban_books(callback: CallbackQuery):
+    user_id = int(callback.data.replace("act_sban_books_", ""))
+    user = await get_user(user_id)
+    new_val = 0 if user['ban_books'] == 1 else 1
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET ban_books = ? WHERE user_id = ?", (new_val, user_id))
+        await db.commit()
+    await callback.answer(f"Shadow Ban Books: {new_val}")
 
 
 @router.message(AdminStates.waiting_amount)
@@ -4905,12 +5133,11 @@ async def process_amount(message: Message, state: FSMContext):
     await state.clear()
     
     new_balance = await get_balance(target_user_id)
-    is_main = await is_main_admin(message.from_user.id)
     await message.answer(
         f"✅ Баланс изменён!\n\n"
         f"Изменение: {'+' if amount > 0 else ''}{amount} Ежидзиков👍\n"
         f"Новый баланс: {new_balance} Ежидзиков👍",
-        reply_markup=admin_keyboard(is_main)
+        reply_markup=admin_main_keyboard()
     )
 
 
@@ -4957,8 +5184,7 @@ async def process_ban_reason(message: Message, state: FSMContext):
     except:
         pass
     
-    is_main = await is_main_admin(message.from_user.id)
-    await message.answer(f"✅ Пользователь @{user['username']} забанен!\nПричина: {reason}", reply_markup=admin_keyboard(is_main))
+    await message.answer(f"✅ Пользователь @{user['username']} забанен!\nПричина: {reason}", reply_markup=admin_main_keyboard())
 
 
 @router.callback_query(F.data == "admin_unban_user")
@@ -4990,26 +5216,61 @@ async def admin_banned_list(callback: CallbackQuery):
     
     await safe_edit_text(callback.message, text, reply_markup=back_button("admin_banlist"))
 
+# =====================================
+# 🤡 ФЕЙК АДМИНЫ
+# =====================================
+
+@router.callback_query(F.data == "admin_manage_fakes")
+async def admin_manage_fakes(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id): return
+    await safe_edit_text(callback.message, "🤡 Управление Фейковыми Админами", reply_markup=fake_admin_manage_keyboard())
+
+@router.callback_query(F.data == "admin_add_fake")
+async def admin_add_fake(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id): return
+    await state.set_state(AdminStates.waiting_fake_admin_search)
+    await state.update_data(action="add")
+    await safe_edit_text(callback.message, "🤡 Введите ID или @username для добавления в Фейки:", reply_markup=back_button("admin_manage_fakes"))
+
+@router.callback_query(F.data == "admin_remove_fake")
+async def admin_remove_fake(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id): return
+    await state.set_state(AdminStates.waiting_fake_admin_search)
+    await state.update_data(action="remove")
+    await safe_edit_text(callback.message, "🤡 Введите ID или @username для удаления из Фейков:", reply_markup=back_button("admin_manage_fakes"))
+
+@router.message(AdminStates.waiting_fake_admin_search)
+async def process_fake_admin_action(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id): return
+    
+    data = await state.get_data()
+    action = data.get('action')
+    user = await find_user_flexible(message.text.strip())
+    
+    if not user:
+        await message.answer("❌ Игрок не найден.")
+        return
+        
+    new_status = 1 if action == "add" else 0
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET is_fake_admin = ? WHERE user_id = ?", (new_status, user['user_id']))
+        await db.commit()
+    
+    await state.clear()
+    status_text = "назначен Фейком 🤡" if new_status else "убран из Фейков"
+    await message.answer(f"✅ Пользователь @{user['username']} {status_text}!", reply_markup=admin_main_keyboard())
+
 
 # =====================================
 # 📋 ДОСЬЕ, ПОДАРОК, СООБЩЕНИЕ
 # =====================================
-
-@router.callback_query(F.data == "admin_dossier")
-async def admin_dossier(callback: CallbackQuery, state: FSMContext):
-    if not await is_admin(callback.from_user.id):
-        return
-    await state.set_state(AdminStates.waiting_user_search)
-    await state.update_data(action="dossier")
-    await safe_edit_text(callback.message, "📋 Досье игрока\n\nВведи ID, @username или #номер игрока:", reply_markup=back_button("admin_panel"))
-
 
 @router.callback_query(F.data == "admin_global_gift")
 async def admin_global_gift(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         return
     await state.set_state(AdminStates.waiting_global_gift)
-    await safe_edit_text(callback.message, "🎁 Подарок всем игрокам\n\nВведи количество Ежидзиков👍 для раздачи:", reply_markup=back_button("admin_panel"))
+    await safe_edit_text(callback.message, "🎁 Подарок всем игрокам\n\nВведи количество Ежидзиков👍 для раздачи:", reply_markup=back_button("admin_folder_marketing"))
 
 
 @router.message(AdminStates.waiting_global_gift)
@@ -5042,8 +5303,7 @@ async def process_global_gift(message: Message, state: FSMContext):
             pass
     
     await add_admin_log(message.from_user.username or "Unknown", "global_gift", f"{amount} Ежидзиков для {len(all_users)} игроков")
-    is_main = await is_main_admin(message.from_user.id)
-    await message.answer(f"🎁 Подарок отправлен!\n\n💰 Сумма: {amount} Ежидзиков👍\n👥 Получили: {len(all_users)} игроков\n📨 Уведомлено: {success}", reply_markup=admin_keyboard(is_main))
+    await message.answer(f"🎁 Подарок отправлен!\n\n💰 Сумма: {amount} Ежидзиков👍\n👥 Получили: {len(all_users)} игроков\n📨 Уведомлено: {success}", reply_markup=admin_main_keyboard())
 
 
 @router.callback_query(F.data == "admin_personal_msg")
@@ -5052,7 +5312,7 @@ async def admin_personal_msg(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdminStates.waiting_user_search)
     await state.update_data(action="personal_msg")
-    await safe_edit_text(callback.message, "✉️ Написать игроку\n\nВведи ID, @username или #номер игрока:", reply_markup=back_button("admin_panel"))
+    await safe_edit_text(callback.message, "✉️ Написать игроку\n\nВведи ID, @username или #номер игрока:", reply_markup=back_button("admin_folder_players"))
 
 
 @router.message(AdminStates.waiting_personal_message)
@@ -5074,11 +5334,9 @@ async def process_personal_message(message: Message, state: FSMContext):
     try:
         await bot.send_message(target_user_id, f"✉️ Сообщение от администрации:\n\n{text}")
         await add_admin_log(message.from_user.username or "Unknown", "personal_msg", f"@{target_username}")
-        is_main = await is_main_admin(message.from_user.id)
-        await message.answer(f"✅ Сообщение отправлено @{target_username}!", reply_markup=admin_keyboard(is_main))
+        await message.answer(f"✅ Сообщение отправлено @{target_username}!", reply_markup=admin_main_keyboard())
     except:
-        is_main = await is_main_admin(message.from_user.id)
-        await message.answer(f"❌ Не удалось отправить сообщение @{target_username}", reply_markup=admin_keyboard(is_main))
+        await message.answer(f"❌ Не удалось отправить сообщение @{target_username}", reply_markup=admin_main_keyboard())
 
 
 # =====================================
@@ -5138,7 +5396,7 @@ async def setting_change(callback: CallbackQuery, state: FSMContext):
     await state.update_data(setting_key=setting_key)
     await state.set_state(AdminStates.waiting_setting_value)
     current = await get_setting(setting_key, "0")
-    await safe_edit_text(callback.message, f"⚙️ {setting_names.get(setting_key, setting_key)}\n\nТекущее значение: {current}\n\nВведи новое значение:", reply_markup=back_button("admin_settings"))
+    await safe_edit_text(callback.message, f"⚙️ {setting_names.get(setting_key, setting_key)}\n\nТекущее значение: {current}\n\nВведи новое значение:", reply_markup=back_button("admin_folder_settings"))
 
 
 @router.message(AdminStates.waiting_setting_value)
@@ -5157,8 +5415,7 @@ async def process_setting_value(message: Message, state: FSMContext):
     await set_setting(setting_key, str(value))
     await add_admin_log(message.from_user.username or "Unknown", "change_setting", f"{setting_key} = {value}")
     await state.clear()
-    is_main = await is_main_admin(message.from_user.id)
-    await message.answer(f"✅ Настройка изменена!\n\n{setting_key} = {value}", reply_markup=admin_keyboard(is_main))
+    await message.answer(f"✅ Настройка изменена!\n\n{setting_key} = {value}", reply_markup=admin_main_keyboard())
 
 @router.callback_query(F.data == "admin_download_db")
 async def admin_download_db(callback: CallbackQuery):
@@ -5228,12 +5485,12 @@ async def process_admin_username(message: Message, state: FSMContext):
             user = await cursor.fetchone()
     if not user:
         await state.clear()
-        await message.answer(f"❌ Пользователь @{username} не найден!\n\nОн должен хотя бы раз написать боту.", reply_markup=admin_keyboard(True))
+        await message.answer(f"❌ Пользователь @{username} не найден!\n\nОн должен хотя бы раз написать боту.", reply_markup=admin_main_keyboard())
         return
     await add_admin(username, message.from_user.username or "Unknown")
     await add_admin_log(message.from_user.username or "Unknown", "add_admin", f"@{username}")
     await state.clear()
-    await message.answer(f"✅ Админ @{username} добавлен!", reply_markup=admin_keyboard(True))
+    await message.answer(f"✅ Админ @{username} добавлен!", reply_markup=admin_main_keyboard())
 
 
 @router.callback_query(F.data == "admin_remove_admin")
@@ -5320,7 +5577,8 @@ async def process_item_currency(callback: CallbackQuery, state: FSMContext):
         return
     
     currency_code = callback.data.replace("shop_curr_", "")
-    currency = "balance" if currency_code == "balance" else "skin"
+    # Валюты: balance (ежидзики), skin (кожа), diamonds (алмазы)
+    currency = currency_code 
     
     data = await state.get_data()
     item_name = data['item_name']
@@ -5332,13 +5590,15 @@ async def process_item_currency(callback: CallbackQuery, state: FSMContext):
             await db.commit()
             await add_admin_log(callback.from_user.username or "Unknown", "add_item", f"{item_name}: {item_price} {currency}")
             await state.clear()
-            is_main = await is_main_admin(callback.from_user.id)
-            price_text = f"{item_price} {'Ежидзиков' if currency=='balance' else 'Кожи слона'}" if item_price > 0 else "Бесплатно!"
-            await callback.message.answer(f"✅ Товар добавлен!\n\n📦 {item_name}\n💰 {price_text}", reply_markup=admin_keyboard(is_main))
+            
+            currency_names = {"balance": "Ежидзиков", "skin": "Кожи слона", "diamonds": "Алмазов"}
+            curr_name = currency_names.get(currency, currency)
+            price_text = f"{item_price} {curr_name}" if item_price > 0 else "Бесплатно!"
+            
+            await callback.message.answer(f"✅ Товар добавлен!\n\n📦 {item_name}\n💰 {price_text}", reply_markup=admin_main_keyboard())
         except:
             await state.clear()
-            is_main = await is_main_admin(callback.from_user.id)
-            await callback.message.answer("❌ Товар с таким названием уже существует!", reply_markup=admin_keyboard(is_main))
+            await callback.message.answer("❌ Товар с таким названием уже существует!", reply_markup=admin_main_keyboard())
 
 
 @router.callback_query(F.data == "admin_delete_item")
@@ -5382,7 +5642,7 @@ async def admin_view_inventory(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdminStates.waiting_user_search)
     await state.update_data(action="view_inventory")
-    await safe_edit_text(callback.message, "👀 Введи ID, @username или #номер игрока:", reply_markup=back_button("admin_shop"))
+    await safe_edit_text(callback.message, "👀 Введи ID, @username или #номер игрока:", reply_markup=back_button("admin_folder_content"))
 
 
 # =====================================
@@ -5409,29 +5669,33 @@ async def approve_ad(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
         return
     ad_id = int(callback.data.replace("approve_ad_", ""))
+    
+    # Race Condition Protection
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT user_id FROM ads WHERE id = ?", (ad_id,)) as cursor:
+        async with db.execute("SELECT status, user_id FROM ads WHERE id = ?", (ad_id,)) as cursor:
             ad = await cursor.fetchone()
+        
+        if not ad or ad['status'] != 'pending':
+            await callback.answer("✋ Заявка уже обработана другим администратором!", show_alert=True)
+            await safe_delete(callback.message)
+            await admin_moderate_ads(callback)
+            return
+
         await db.execute("UPDATE ads SET status = 'approved' WHERE id = ?", (ad_id,))
         await db.commit()
+        
     if ad:
         try:
             await bot.send_message(ad['user_id'], "✅ Ваша реклама одобрена и добавлена в ротацию!")
         except:
             pass
+            
     await add_admin_log(callback.from_user.username or "Unknown", "approve_ad", str(ad_id))
     await callback.answer("✅ Реклама одобрена!", show_alert=True)
     await safe_delete(callback.message)
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM ads WHERE status = 'pending' LIMIT 1") as cursor:
-            next_ad = await cursor.fetchone()
-    if next_ad:
-        await callback.message.answer_photo(next_ad['file_id'], caption=f"🖼 Реклама на модерацию\n\nID: {next_ad['id']}\nОт: {next_ad['user_id']}", reply_markup=ad_moderation_keyboard(next_ad['id']))
-    else:
-        is_main = await is_main_admin(callback.from_user.id)
-        await callback.message.answer("✅ Вся реклама проверена!\n\n🛠 Панель администратора", reply_markup=admin_keyboard(is_main))
+    # Load next
+    await admin_moderate_ads(callback)
 
 
 @router.callback_query(F.data.startswith("reject_ad_"))
@@ -5439,30 +5703,32 @@ async def reject_ad(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
         return
     ad_id = int(callback.data.replace("reject_ad_", ""))
+    
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT user_id FROM ads WHERE id = ?", (ad_id,)) as cursor:
+        async with db.execute("SELECT status, user_id FROM ads WHERE id = ?", (ad_id,)) as cursor:
             ad = await cursor.fetchone()
+            
+        if not ad or ad['status'] != 'pending':
+            await callback.answer("✋ Заявка уже обработана другим администратором!", show_alert=True)
+            await safe_delete(callback.message)
+            await admin_moderate_ads(callback)
+            return
+
         await db.execute("DELETE FROM ads WHERE id = ?", (ad_id,))
         await db.commit()
+        
     if ad:
         await update_balance(ad['user_id'], 70)
         try:
             await bot.send_message(ad['user_id'], "❌ Ваша реклама отклонена.\n💰 70 Ежидзиков👍 возвращены на баланс.")
         except:
             pass
+            
     await add_admin_log(callback.from_user.username or "Unknown", "reject_ad", str(ad_id))
     await callback.answer("❌ Реклама отклонена!", show_alert=True)
     await safe_delete(callback.message)
-    async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM ads WHERE status = 'pending' LIMIT 1") as cursor:
-            next_ad = await cursor.fetchone()
-    if next_ad:
-        await callback.message.answer_photo(next_ad['file_id'], caption=f"🖼 Реклама на модерацию\n\nID: {next_ad['id']}\nОт: {next_ad['user_id']}", reply_markup=ad_moderation_keyboard(next_ad['id']))
-    else:
-        is_main = await is_main_admin(callback.from_user.id)
-        await callback.message.answer("✅ Вся реклама проверена!\n\n🛠 Панель администратора", reply_markup=admin_keyboard(is_main))
+    await admin_moderate_ads(callback)
 
 
 @router.callback_query(F.data == "admin_delete_ads")
@@ -5479,7 +5745,7 @@ async def admin_delete_ads(callback: CallbackQuery):
     buttons = []
     for ad in ads[:10]:
         buttons.append([InlineKeyboardButton(text=f"👁 Реклама #{ad['id']}", callback_data=f"preview_ad_{ad['id']}")])
-    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")])
+    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_marketing")])
     await safe_edit_text(callback.message, f"🗑 Удаление рекламы\n\nВсего одобренных: {len(ads)}\n\nНажми для предпросмотра:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
@@ -5517,8 +5783,7 @@ async def delete_ad(callback: CallbackQuery):
     await add_admin_log(callback.from_user.username or "Unknown", "delete_ad", str(ad_id))
     await callback.answer("✅ Реклама удалена!", show_alert=True)
     await safe_delete(callback.message)
-    is_main = await is_main_admin(callback.from_user.id)
-    await callback.message.answer("🛠 Панель администратора", reply_markup=admin_keyboard(is_main))
+    await admin_delete_ads(callback)
 
 # =====================================
 # 🖼 УПРАВЛЕНИЕ МЕДИА (/add)
@@ -5536,17 +5801,7 @@ async def admin_manage_media(callback: CallbackQuery):
         "Чтобы добавить/изменить медиа, отправьте мне картинку с подписью:\n"
         "`/add <имя_экрана>`\n\n"
         "**Доступные имена экранов:**\n"
-        "`menu` - Главное меню\n"
-        "`casino` - Меню казино\n"
-        "`shop` - Магазин\n"
-        "`pet` - Погладить\n"
-        "`feed` - Покормить\n"
-        "`bonuses` - Бонусы\n"
-        "`transfer` - Перевод\n"
-        "`exchange` - Обменник\n"
-        "`website` - Сайт\n"
-        "`call` - Звонок\n"
-        "`support` - Поддержка"
+        "`menu`, `casino`, `shop`, `pet`, `feed`, `bonuses`, `transfer`, `exchange`, `website`, `call`, `support`"
     )
     
     async with aiosqlite.connect(DB_NAME) as db:
@@ -5559,7 +5814,7 @@ async def admin_manage_media(callback: CallbackQuery):
         for m in medias:
              buttons.append([InlineKeyboardButton(text=f"🗑 Удалить: {m['screen_name']}", callback_data=f"del_media_{m['screen_name']}")])
     
-    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")])
+    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_content")])
     
     await safe_edit_text(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
 
@@ -5609,7 +5864,7 @@ async def admin_add_command(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         return
     await state.set_state(AdminStates.waiting_command_name)
-    await safe_edit_text(callback.message, "📝 Введи команду (например: /hi, /photos, /info):", reply_markup=back_button("admin_panel"))
+    await safe_edit_text(callback.message, "📝 Введи команду (например: /hi, /photos, /info):", reply_markup=back_button("admin_folder_content"))
 
 
 @router.message(AdminStates.waiting_command_name)
@@ -5621,7 +5876,7 @@ async def process_command_name(message: Message, state: FSMContext):
         command = "/" + command
     await state.update_data(command_name=command)
     await state.set_state(AdminStates.waiting_command_response)
-    await message.answer(f"📝 Теперь отправь ответ для команды {command}\n\nМожно отправить текст, фото или видео с подписью.", reply_markup=back_button("admin_panel"))
+    await message.answer(f"📝 Теперь отправь ответ для команды {command}\n\nМожно отправить текст, фото или видео с подписью.", reply_markup=back_button("admin_folder_content"))
 
 
 @router.message(AdminStates.waiting_command_response)
@@ -5648,12 +5903,10 @@ async def process_command_response(message: Message, state: FSMContext):
             await db.commit()
             await add_admin_log(message.from_user.username or "Unknown", "add_command", command_name)
             await state.clear()
-            is_main = await is_main_admin(message.from_user.id)
-            await message.answer(f"✅ Команда {command_name} создана!", reply_markup=admin_keyboard(is_main))
+            await message.answer(f"✅ Команда {command_name} создана!", reply_markup=admin_main_keyboard())
         except:
             await state.clear()
-            is_main = await is_main_admin(message.from_user.id)
-            await message.answer(f"❌ Команда {command_name} уже существует!", reply_markup=admin_keyboard(is_main))
+            await message.answer(f"❌ Команда {command_name} уже существует!", reply_markup=admin_main_keyboard())
 
 
 @router.callback_query(F.data == "admin_manage_commands")
@@ -5665,12 +5918,12 @@ async def admin_manage_commands(callback: CallbackQuery):
         async with db.execute("SELECT * FROM custom_commands ORDER BY command") as cursor:
             commands = await cursor.fetchall()
     if not commands:
-        await safe_edit_text(callback.message, "📋 Нет созданных команд", reply_markup=back_button("admin_panel"))
+        await safe_edit_text(callback.message, "📋 Нет созданных команд", reply_markup=back_button("admin_folder_content"))
         return
     buttons = []
     for cmd in commands:
         buttons.append([InlineKeyboardButton(text=f"🗑 {cmd['command']}", callback_data=f"delete_cmd_{cmd['id']}")])
-    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_panel")])
+    buttons.append([InlineKeyboardButton(text="Назад ◀️◀️◀️", callback_data="admin_folder_content")])
     await safe_edit_text(callback.message, f"📋 Управление командами ({len(commands)} шт.)\n\nНажми чтобы удалить:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
@@ -5701,9 +5954,15 @@ async def approve_book(callback: CallbackQuery):
     book_id = int(callback.data.replace("approve_book_", ""))
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
-        # Получаем данные книги для уведомления автора
-        async with db.execute("SELECT * FROM books WHERE id = ?", (book_id,)) as cursor:
+        
+        # Check race condition
+        async with db.execute("SELECT status, author_id, title FROM books WHERE id = ?", (book_id,)) as cursor:
             book = await cursor.fetchone()
+            
+        if not book or book['status'] != 'pending':
+            await callback.answer("✋ Заявка уже обработана другим админом!", show_alert=True)
+            await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n⚠️ ОБРАБОТАНО")
+            return
         
         await db.execute("UPDATE books SET status = 'approved' WHERE id = ?", (book_id,))
         await db.commit()
@@ -5723,8 +5982,15 @@ async def reject_book(callback: CallbackQuery):
     book_id = int(callback.data.replace("reject_book_", ""))
     async with aiosqlite.connect(DB_NAME) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM books WHERE id = ?", (book_id,)) as cursor:
+        
+        # Check race condition
+        async with db.execute("SELECT status, author_id, title FROM books WHERE id = ?", (book_id,)) as cursor:
             book = await cursor.fetchone()
+            
+        if not book or book['status'] != 'pending':
+            await callback.answer("✋ Заявка уже обработана другим админом!", show_alert=True)
+            await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n⚠️ ОБРАБОТАНО")
+            return
             
         await db.execute("DELETE FROM books WHERE id = ?", (book_id,))
         await db.commit()
@@ -5782,8 +6048,7 @@ async def process_support_reply(message: Message, state: FSMContext):
             except:
                 pass
     await state.clear()
-    is_main = await is_main_admin(message.from_user.id)
-    await message.answer("✅ Ответ отправлен пользователю!", reply_markup=admin_keyboard(is_main))
+    await message.answer("✅ Ответ отправлен пользователю!", reply_markup=admin_main_keyboard())
 
 
 @router.callback_query(F.data.startswith("ignore_ticket_"))
@@ -5966,26 +6231,64 @@ async def ant_income_loop():
             print(f"Ошибка начисления муравьёв: {e}")
 
 async def hunger_loop():
+    # Реализация механики выживания v3.8
+    # Еж умирает за 3 дня (72 часа) = 100% сытости.
+    # Обновление каждые 10 минут.
+    # 72 часа = 432 интервала по 10 минут.
+    # Потеря сытости за интервал = 100 / 432 ≈ 0.2315%
+    
+    base_hunger_drop = 0.2315
+    furniture_hunger_drop = 0.15 # Сниженная скорость с мебелью
+    
     while True:
         await asyncio.sleep(600) # Every 10 minutes
         try:
             async with aiosqlite.connect(DB_NAME) as db:
-                # Decrease satiety by 2% for alive users
-                await db.execute("UPDATE users SET satiety = satiety - 2 WHERE status = 'alive'")
-                await db.commit()
-
-                # Find starved users
-                async with db.execute("SELECT user_id FROM users WHERE status = 'alive' AND satiety <= 0") as cursor:
-                    dead_users = await cursor.fetchall()
-
-                # Kill them
-                if dead_users:
-                    for (uid,) in dead_users:
+                db.row_factory = aiosqlite.Row
+                # Получаем всех живых пользователей
+                async with db.execute("SELECT user_id, satiety, alert_sent FROM users WHERE status = 'alive'") as cursor:
+                    users = await cursor.fetchall()
+                
+                for user in users:
+                    uid = user['user_id']
+                    current_satiety = user['satiety']
+                    
+                    # Проверяем наличие мебели
+                    has_furniture = False
+                    async with db.execute('''
+                        SELECT i.quantity, s.name FROM inventory i
+                        JOIN shop_items s ON i.item_id = s.id
+                        WHERE i.user_id = ? AND i.quantity > 0
+                    ''', (uid,)) as inv_cursor:
+                        items = await inv_cursor.fetchall()
+                        for item in items:
+                            for kw in FURNITURE_KEYWORDS:
+                                if kw in item['name'].lower():
+                                    has_furniture = True
+                                    break
+                            if has_furniture: break
+                    
+                    drop_rate = furniture_hunger_drop if has_furniture else base_hunger_drop
+                    new_satiety = current_satiety - drop_rate
+                    
+                    # Alert logic (20%)
+                    alert_sql_update = ""
+                    if new_satiety <= 20.0 and user['alert_sent'] == 0:
+                        try:
+                            await bot.send_message(uid, "🆘 ХОЗЯИН! Я ГОЛОДЕН! Моя сытость упала до 20%!\nСрочно покорми меня, иначе я умру!")
+                            alert_sql_update = ", alert_sent = 1"
+                        except: pass
+                    
+                    # Death logic
+                    if new_satiety <= 0:
                         await db.execute("UPDATE users SET status = 'dead', satiety = 0 WHERE user_id = ?", (uid,))
                         try:
                             await bot.send_message(uid, "☠️ Ваш ёжик умер от голода...\nНажмите /start или любую кнопку для перехода в посмертие.", reply_markup=death_reply_keyboard())
                         except: pass
-                    await db.commit()
+                    else:
+                        await db.execute(f"UPDATE users SET satiety = ? {alert_sql_update} WHERE user_id = ?", (new_satiety, uid))
+                        
+                await db.commit()
                     
         except Exception as e:
             print(f"Ошибка цикла голода: {e}")
@@ -6011,4 +6314,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
